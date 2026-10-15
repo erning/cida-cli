@@ -26,6 +26,7 @@ use -- before text that starts with a dash.
 Options:
   -a, --action ACTION  translate (default), improve, or a custom action name
       --config PATH    configuration file (default: ~/.config/cida/config.json)
+      --print-prompt   print the assembled system prompt without source text
   -h, --help           show this help
       --version        show the version
 
@@ -39,10 +40,12 @@ Examples:
   cida "你好"
   cida --action translate "Hello"
   cida -a improve "This are a example."
+  cida --print-prompt -a translate
   cat article.txt | cida
   cida -- "--help is a command-line option"
 
 Standard output contains only the result, streamed as it arrives.
+With --print-prompt, print only the system prompt; no input or request is needed.
 Errors go to standard error. Exit codes: 0 success, 1 request/I/O failure,
 2 argument/configuration error, 130 interrupted.
 `
@@ -60,13 +63,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, interactive bool, 
 	fs := flag.NewFlagSet("cida", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var actionName, path string
-	var help, showVersion bool
+	var help, showVersion, printPrompt bool
 	fs.StringVar(&actionName, "action", config.Translate, "action to run")
 	fs.StringVar(&actionName, "a", config.Translate, "action to run")
 	fs.StringVar(&path, "config", "", "configuration path")
 	fs.BoolVar(&help, "help", false, "show help")
 	fs.BoolVar(&help, "h", false, "show help")
 	fs.BoolVar(&showVersion, "version", false, "show version")
+	fs.BoolVar(&printPrompt, "print-prompt", false, "print the system prompt without sending a request")
 	fs.Usage = func() { fmt.Fprint(stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -81,7 +85,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, interactive bool, 
 	}
 
 	text := strings.Join(fs.Args(), " ")
-	if fs.NArg() == 0 {
+	if !printPrompt && fs.NArg() == 0 {
 		if interactive {
 			fmt.Fprintln(stderr, "cida: provide text as arguments or through standard input; see cida --help")
 			return 2
@@ -93,7 +97,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, interactive bool, 
 		}
 		text = string(data)
 	}
-	if strings.TrimSpace(text) == "" {
+	if !printPrompt && strings.TrimSpace(text) == "" {
 		fmt.Fprintln(stderr, "cida: the input text is empty")
 		return 2
 	}
@@ -105,11 +109,15 @@ func run(ctx context.Context, args []string, stdin io.Reader, interactive bool, 
 			return 2
 		}
 	}
-	cfg, err := config.Load(path)
+	loadConfig := config.Load
+	if printPrompt {
+		loadConfig = config.LoadForPrompt
+	}
+	cfg, err := loadConfig(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "cida: configuration %s: %v\n", path, err)
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(stderr, "Create it using config.example.json and fill in endpoint, format, model and api_key.")
+			fmt.Fprintln(stderr, "Create it using config.example.json.")
 		}
 		return 2
 	}
@@ -121,6 +129,15 @@ func run(ctx context.Context, args []string, stdin io.Reader, interactive bool, 
 		}
 		fmt.Fprintf(stderr, "cida: unknown action %q; available: %s\n", actionName, strings.Join(names, ", "))
 		return 2
+	}
+
+	if printPrompt {
+		_, err := fmt.Fprintln(stdout, llm.BuildPrompt(cfg, action, "").System)
+		if err != nil {
+			fmt.Fprintln(stderr, "cida: write output:", err)
+			return 1
+		}
+		return 0
 	}
 
 	// Stop the request if the output consumer fails or closes a pipe.

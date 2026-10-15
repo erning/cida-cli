@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/erning/cida-cli/internal/config"
 	"github.com/erning/cida-cli/internal/llm"
 	"github.com/erning/cida-cli/internal/testutil"
 )
@@ -165,4 +166,83 @@ func TestCLIOutputFailure(t *testing.T) {
 	if code != 1 || !strings.Contains(diagnostics.String(), "output closed") {
 		t.Fatalf("exit %d, stderr %q", code, diagnostics.String())
 	}
+}
+
+type forbiddenInput struct{ t *testing.T }
+
+func (r forbiddenInput) Read([]byte) (int, error) {
+	r.t.Error("prompt printing must not read standard input")
+	return 0, errors.New("unexpected input read")
+}
+
+func TestCLIPrintPrompt(t *testing.T) {
+	srv := testutil.NewServer(t, llm.DefaultClient.HTTP, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("prompt printing must not call the model service")
+	}))
+	path := cliConfig(t, srv.URL)
+	for _, tc := range []struct {
+		name, action, policy, behavior string
+		interactive                    bool
+		text                           []string
+	}{
+		{"default without input", "", config.DefaultTranslationPrompt, "translate_between", true, nil},
+		{"translate with source", "TRANSLATE", config.DefaultTranslationPrompt, "translate_between", false, []string{"PRIVATE_SOURCE_TEXT"}},
+		{"improve", "improve", config.DefaultImprovementPrompt, "preserve_source", false, nil},
+		{"custom", "ConCiSe", "Shorten it.", "follow_policy", true, []string{"PRIVATE_SOURCE_TEXT"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"--config", path, "--print-prompt"}
+			if tc.action != "" {
+				args = append(args, "--action", tc.action)
+			}
+			args = append(args, tc.text...)
+			var out, diagnostics bytes.Buffer
+			code := run(context.Background(), args, forbiddenInput{t}, tc.interactive, &out, &diagnostics)
+			if code != 0 || diagnostics.Len() != 0 {
+				t.Fatalf("exit %d, stderr %q", code, diagnostics.String())
+			}
+			prompt := out.String()
+			if !strings.HasPrefix(prompt, tc.policy+"\n\nApplication contract:") || !strings.Contains(prompt, `"language_behavior":"`+tc.behavior+`"`) {
+				t.Fatalf("missing assembled prompt components: %s", prompt)
+			}
+			for _, excluded := range []string{"PRIVATE_SOURCE_TEXT", "sk-cli-secret", srv.URL, "test-model"} {
+				if strings.Contains(prompt, excluded) {
+					t.Errorf("prompt contains excluded data %q", excluded)
+				}
+			}
+			if tc.behavior == "translate_between" && (!strings.Contains(prompt, `"my_language":"粤语"`) || !strings.Contains(prompt, `"foreign_language":"日本語"`)) {
+				t.Fatal("prompt is missing the configured languages")
+			}
+		})
+	}
+}
+
+func TestCLIPrintPromptWithoutServiceConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, diagnostics bytes.Buffer
+	code := run(context.Background(), []string{"--config", path, "--print-prompt"}, forbiddenInput{t}, true, &out, &diagnostics)
+	if code != 0 || diagnostics.Len() != 0 || !strings.Contains(out.String(), `"my_language":"简体中文"`) || !strings.Contains(out.String(), `"foreign_language":"English"`) {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, out.String(), diagnostics.String())
+	}
+}
+
+func TestCLIPrintPromptErrors(t *testing.T) {
+	path := cliConfig(t, "http://127.0.0.1/v1")
+	t.Run("unknown action", func(t *testing.T) {
+		var out, diagnostics bytes.Buffer
+		code := run(context.Background(), []string{"--config", path, "--print-prompt", "-a", "missing"}, forbiddenInput{t}, true, &out, &diagnostics)
+		if code != 2 || out.Len() != 0 || !strings.Contains(diagnostics.String(), "available: translate, improve, concise") {
+			t.Fatalf("exit %d, stdout %q, stderr %q", code, out.String(), diagnostics.String())
+		}
+	})
+	t.Run("output failure", func(t *testing.T) {
+		var diagnostics bytes.Buffer
+		code := run(context.Background(), []string{"--config", path, "--print-prompt"}, forbiddenInput{t}, true, brokenWriter{}, &diagnostics)
+		if code != 1 || !strings.Contains(diagnostics.String(), "output closed") {
+			t.Fatalf("exit %d, stderr %q", code, diagnostics.String())
+		}
+	})
 }

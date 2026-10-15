@@ -59,6 +59,20 @@ Invoke it with `./cida -a concise "Text"`. Names are case insensitive and must
 not duplicate another action or shadow `translate` or `improve`. Custom
 actions follow their own output policy, including any requested format.
 
+Use `--print-prompt` to inspect the assembled system prompt for an action:
+
+```sh
+./cida --print-prompt
+./cida --print-prompt -a improve
+./cida --print-prompt -a concise
+```
+
+This prints the action policy, application contract, and runtime parameters
+as plain text to stdout. It excludes the source text, ignores text arguments
+and standard input, and sends no model request. No input text is required.
+The configuration file must exist, but service settings and an API key are
+not required in this mode; language defaults and custom actions still apply.
+
 ## Input and output
 
 Options must come before text. Multiple text arguments are joined with a

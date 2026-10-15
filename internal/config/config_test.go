@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,5 +92,26 @@ func TestBodyPreservesLargeNumbers(t *testing.T) {
 	data, err := json.Marshal(c.Body)
 	if err != nil || string(data) != `{"seed":9007199254740993}` {
 		t.Fatalf("body %s, err %v", data, err)
+	}
+}
+
+func TestLoadForPromptKeepsConfigurationValidation(t *testing.T) {
+	for _, tc := range []struct{ name, data, want string }{
+		{"invalid JSON", `{`, "invalid JSON"},
+		{"unknown field", `{"translation_prompt":"override"}`, "unknown field"},
+		{"extra document", `{} {}`, "exactly one"},
+		{"invalid action", `{"actions":[{"name":"short"}]}`, "has no prompt"},
+		{"builtin shadow", `{"actions":[{"name":"improve","prompt":"override"}]}`, "shadows a built-in"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadForPrompt(path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

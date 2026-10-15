@@ -81,9 +81,37 @@ func Load(path string) (*Config, error) {
 	return Parse(data)
 }
 
+// LoadForPrompt reads the prompt's languages and actions without requiring
+// service settings or credentials. The schema and custom actions remain strict.
+func LoadForPrompt(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c, err := decode(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.validateActions(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // Parse accepts exactly one JSON object. Unknown fields, including removed
 // GUI settings and built-in prompt overrides, are errors.
 func Parse(data []byte) (*Config, error) {
+	c, err := decode(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func decode(data []byte) (*Config, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	dec.UseNumber()
@@ -100,9 +128,6 @@ func Parse(data []byte) (*Config, error) {
 	}
 	c.Endpoint = strings.TrimSpace(c.Endpoint)
 	c.Model = strings.TrimSpace(c.Model)
-	if err := c.Validate(); err != nil {
-		return nil, err
-	}
 	return c, nil
 }
 
@@ -132,6 +157,10 @@ func (c *Config) Validate() error {
 	if c.RequiresAPIKey() && strings.TrimSpace(c.APIKey) == "" {
 		return errors.New("api_key is missing")
 	}
+	return c.validateActions()
+}
+
+func (c *Config) validateActions() error {
 	seen := []string{Translate, Improve}
 	for i, a := range c.Actions {
 		name := strings.TrimSpace(a.Name)
