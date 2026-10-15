@@ -4,20 +4,51 @@ A standalone Go command-line client for translating and improving text with
 your language model. Adapted from [辞达 (Cida)](https://github.com/Xuanwo/cida)
 by Xuanwo, using only the Go standard library.
 
+## Download
+
+Download the binary for your platform from
+[GitHub Releases](https://github.com/erning/cida-cli/releases).
+The first release is `v1.0.0`:
+
+| Platform | Binary |
+| --- | --- |
+| macOS, Apple Silicon | `cida-darwin_arm64-v1.0.0` |
+| macOS, Intel | `cida-darwin_amd64-v1.0.0` |
+| Linux, ARM64 | `cida-linux_arm64-v1.0.0` |
+| Linux, AMD64 | `cida-linux_amd64-v1.0.0` |
+
+Rename the downloaded file to `cida`, then make it executable:
+
+```sh
+chmod +x cida
+./cida --version
+```
+
+Release binaries do not require Go to be installed. Each release also includes
+`SHA256SUMS` and `LICENSE-Cida.txt`. To verify a downloaded binary, download
+`SHA256SUMS` into the same directory and check its entry before renaming it.
+For example, on macOS with the ARM64 binary:
+
+```sh
+grep ' cida-darwin_arm64-v1.0.0$' SHA256SUMS | shasum -a 256 -c -
+```
+
 ## Build and try
 
 Requires Go 1.26 or newer.
 
 ```sh
-go build -o cida .
+go build -trimpath -ldflags='-s -w' -o cida .
 ./cida --help
 ```
 
+This strips symbols and DWARF debug information while retaining the existing
+functionality, including HTTP/2. Use `go build -o cida .` when debugging.
+
 Create `~/.config/cida/config.json` using
-[`config.example.json`](config.example.json), then fill in `endpoint`, `format`,
-`model`, and `api_key` for your service. The endpoint is the complete request
-URL, including its API path. The example intentionally leaves the model and
-key empty. Use file permissions `600` when storing a key.
+[`config.example.json`](config.example.json), then adjust the service and
+language settings for your setup. The endpoint is the complete request URL,
+including its API path. Use file permissions `600` when storing a key.
 
 ```sh
 ./cida "你好，世界"
@@ -144,11 +175,48 @@ Tests use in-process HTTP fixtures, without a listening port or real API key.
 They cover CLI input, action selection, configuration validation, request
 formats, streaming and complete responses, cancellation, and error handling.
 
-To embed a version:
+To embed a version in a local build:
 
 ```sh
-go build -ldflags '-X main.version=v0.1.0' -o cida .
+go build -trimpath -ldflags '-s -w -X main.version=v1.0.0' -o cida .
 ```
+
+Without version injection, `cida --version` reports `cida dev`.
+
+## Releases
+
+The Git tag is the source of the release version. Tags use `vMAJOR.MINOR.PATCH`,
+such as `v1.0.0`, with an optional prerelease suffix such as `v1.1.0-rc.1`.
+Prerelease tags produce GitHub prereleases.
+
+To build the four release binaries locally, using the same script as Actions:
+
+```sh
+scripts/build-release.sh v1.0.0
+```
+
+The files are written to `dist/v1.0.0/`. The script disables cgo for cross
+compilation, uses `-trimpath -ldflags='-s -w'`, injects the version, and checks
+`--version` on the host's matching binary. It also copies the upstream license
+and calculates SHA-256 checksums. Local rebuilds replace generated files in
+that version's output directory.
+
+To publish a release after committing and pushing the changes:
+
+```sh
+git tag -a v1.0.0 -m 'Release v1.0.0'
+git push origin v1.0.0
+```
+
+The tag triggers the Release workflow. It runs `go vet` and the tests with race
+detection on Linux and macOS, cross-compiles all four targets on Ubuntu, then
+creates the GitHub Release and uploads all six assets. The binary names follow
+`cida-<os>_<arch>-<version>`. All builds must succeed before publication.
+
+The workflows use the Go 1.26 series, allowing patch updates, and the repository's
+`GITHUB_TOKEN`; no personal access token is needed. Rerunning a published version
+fails rather than overwriting its assets. Correct a released build with a new
+version tag.
 
 ## Attribution
 

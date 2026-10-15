@@ -14,7 +14,7 @@ import (
 	"github.com/erning/cida-cli/internal/llm"
 )
 
-// Override when building: go build -ldflags '-X main.version=v0.1.0'.
+// Override when building: go build -ldflags '-X main.version=v1.0.0'.
 var version = "dev"
 
 const usage = `Usage: cida [OPTIONS] [TEXT...]
