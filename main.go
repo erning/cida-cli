@@ -43,11 +43,6 @@ Examples:
   cida --print-prompt -a translate
   cat article.txt | cida
   cida -- "--help is a command-line option"
-
-Standard output contains only the result, streamed as it arrives.
-With --print-prompt, print only the system prompt; no input or request is needed.
-Errors go to standard error. Exit codes: 0 success, 1 request/I/O failure,
-2 argument/configuration error, 130 interrupted.
 `
 
 func main() {
