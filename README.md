@@ -1,7 +1,8 @@
 # cida-cli
 
 A standalone Go command-line client for translating and improving text with
-your language model. Adapted from `cida-go`, using only the Go standard library.
+your language model. Adapted from [辞达 (Cida)](https://github.com/Xuanwo/cida)
+by Xuanwo, using only the Go standard library.
 
 ## Build and try
 
@@ -107,7 +108,7 @@ Streams that end without a completion marker are treated as failures.
 ## Configuration
 
 Configuration is standard JSON: comments and trailing commas are not accepted.
-Unknown fields are rejected, including GUI settings from `cida-go`.
+Unknown fields are rejected.
 
 | Field | Behavior |
 | --- | --- |
@@ -151,7 +152,7 @@ go build -ldflags '-X main.version=v0.1.0' -o cida .
 
 ## Attribution
 
-The request formats and built-in policies are adapted from `cida-go` and
-[Cida](https://github.com/Xuanwo/cida) by Xuanwo. The original Cida material is
+The request formats and built-in policies are adapted from
+[辞达 (Cida)](https://github.com/Xuanwo/cida) by Xuanwo. The original Cida material is
 licensed under [Apache-2.0](licenses/Cida.txt); adapted source files identify
 their changes. No GUI assets or third-party Go packages are bundled.
