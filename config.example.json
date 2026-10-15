@@ -1,0 +1,14 @@
+{
+  "endpoint": "https://api.openai.com/v1/chat/completions",
+  "format": "chat-completions",
+  "model": "",
+  "api_key": "",
+  "my_language": "简体中文",
+  "foreign_language": "English",
+  "actions": [
+    {
+      "name": "concise",
+      "prompt": "Make the text shorter without losing meaning. Keep the original language. Return only the revised text."
+    }
+  ]
+}
