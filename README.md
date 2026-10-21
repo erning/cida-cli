@@ -125,7 +125,9 @@ interactive session. Empty or whitespace-only input is rejected.
 Results stream directly to stdout, with a final newline added if needed.
 Diagnostics go to stderr. Ctrl+C cancels an active request. A failed stream
 can leave partial text on stdout, so scripts should check the exit status.
-Streams that end without a completion marker are treated as failures.
+Streams that end without a completion marker, or that contain a corrupt
+event, are treated as failures. Ctrl+C also stops the CLI while it is waiting
+for standard input.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -158,6 +160,12 @@ For example, a `body` of `{"max_tokens": 2048, "thinking": {"type": "disabled"}}
 sets provider-specific options. Anthropic requests default to `max_tokens: 8192`.
 Requests use streaming by default; `body` can override this and the client also
 accepts complete JSON responses. Responses requests default to `store: false`.
+
+Redirects are followed only within the endpoint's origin (scheme, host, and
+port). A redirect to another host, port, or from HTTPS to HTTP fails, so the API
+key and text are never forwarded elsewhere; set `endpoint` to the final URL.
+Credentials in `headers` (for example `Authorization`) are redacted from
+diagnostics like `api_key`.
 
 The client uses standard proxy environment variables. Connection and TLS
 handshake timeouts are 30 seconds, response headers have a five-minute timeout,

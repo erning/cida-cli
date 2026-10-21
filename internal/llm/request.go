@@ -35,7 +35,7 @@ func Prepare(cfg *config.Config, prompt Prompt) *Prepared {
 		Format:   cfg.Format,
 		Body:     body,
 		header:   http.Header{},
-		redactor: Redactor{Secret: cfg.APIKey},
+		redactor: RedactorFor(cfg),
 	}
 	p.header.Set("Content-Type", "application/json")
 	p.header.Set("Accept", "text/event-stream")

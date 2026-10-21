@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,7 +35,42 @@ var DefaultClient = &Client{HTTP: &http.Client{
 		IdleConnTimeout:       90 * time.Second,
 		ForceAttemptHTTP2:     true,
 	},
+	CheckRedirect: SameOriginRedirects,
 }}
+
+// maxRedirects matches net/http's default limit.
+const maxRedirects = 10
+
+// SameOriginRedirects follows redirects only within the endpoint's origin
+// (scheme, host and port). Credentials in headers such as x-api-key would
+// otherwise travel to another host, and a 307 or 308 would resend the text.
+// A hop from https to http is a different origin and so is refused too.
+func SameOriginRedirects(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	from, to := via[0].URL, req.URL
+	if originKey(from) != originKey(to) {
+		return &RedirectError{From: origin(from), To: origin(to)}
+	}
+	return nil
+}
+
+func originKey(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+}
+
+// origin omits the path and query, which may carry secrets.
+func origin(u *url.URL) string { return u.Scheme + "://" + u.Host }
 
 // Run builds the request for action and text and streams the reply.
 func Run(ctx context.Context, cfg *config.Config, action config.Action, text string, onText func(string)) error {
@@ -52,6 +88,10 @@ func (c *Client) Send(ctx context.Context, p *Prepared, onText func(string)) err
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		var re *RedirectError
+		if errors.As(err, &re) {
+			return re
 		}
 		return &TransportError{Err: err}
 	}
@@ -118,6 +158,8 @@ func receiveEvents(ctx context.Context, body io.Reader, p *Prepared, onText func
 			return false, nil
 		case evFailure:
 			return false, &ProviderError{Message: p.redactor.Redact(text)}
+		case evMalformed:
+			return false, &MalformedEventError{Detail: text}
 		}
 		return true, nil
 	}
@@ -258,15 +300,20 @@ const (
 	evRecognized // of this format, carrying no text: a start, a stop reason, a ping
 	evDone
 	evFailure
+	evMalformed // not valid for this format: the stream is corrupt, not merely foreign
 )
 
 func streamEvent(format config.Format, ev sseEvent) (eventKind, string) {
 	if format == config.ChatCompletions && ev.data == "[DONE]" {
 		return evDone, ""
 	}
+	// Some services end any stream with [DONE]; only chat-completions relies on it.
+	if strings.TrimSpace(ev.data) == "" || ev.data == "[DONE]" {
+		return evUnrecognized, ""
+	}
 	payload := parseJSON(ev.data)
 	if _, ok := payload.(map[string]any); !ok {
-		return evUnrecognized, ""
+		return evMalformed, "an event holds no JSON object."
 	}
 	typ := str(get(payload, "type"))
 	if typ == "" {
@@ -283,23 +330,37 @@ func streamEvent(format config.Format, ev sseEvent) (eventKind, string) {
 		if get(payload, "error") != nil {
 			return failure()
 		}
-		choices, ok := get(payload, "choices").([]any)
+		rawChoices := get(payload, "choices")
+		choices, ok := rawChoices.([]any)
 		if !ok {
+			if rawChoices != nil {
+				return evMalformed, "an event's choices is not an array."
+			}
 			return evUnrecognized, ""
 		}
 		if len(choices) > 0 {
 			if message := chatFailure(choices[0]); message != "" {
 				return evFailure, message
 			}
-			if text := str(get(choices[0], "delta", "content")); text != "" {
-				return evText, text
+			switch content := get(choices[0], "delta", "content").(type) {
+			case nil:
+			case string:
+				if content != "" {
+					return evText, content
+				}
+			default:
+				return evMalformed, "an event's delta content is not a string."
 			}
 		}
 		return evRecognized, ""
 	case config.Responses:
 		switch typ {
 		case "response.output_text.delta":
-			if text := str(get(payload, "delta")); text != "" {
+			text, ok := get(payload, "delta").(string)
+			if !ok {
+				return evMalformed, "an event's text delta is not a string."
+			}
+			if text != "" {
 				return evText, text
 			}
 			return evRecognized, ""
@@ -333,7 +394,11 @@ func streamEvent(format config.Format, ev sseEvent) (eventKind, string) {
 		switch typ {
 		case "content_block_delta":
 			if str(get(payload, "delta", "type")) == "text_delta" {
-				if text := str(get(payload, "delta", "text")); text != "" {
+				text, ok := get(payload, "delta", "text").(string)
+				if !ok {
+					return evMalformed, "an event's text delta is not a string."
+				}
+				if text != "" {
 					return evText, text
 				}
 			}
@@ -466,6 +531,18 @@ func (e *UnexpectedResponseError) Error() string {
 	return "unrecognized reply: " + e.Detail + " Check format."
 }
 
+// RedirectError is a redirect to another origin, which is not followed.
+type RedirectError struct{ From, To string }
+
+func (e *RedirectError) Error() string {
+	return fmt.Sprintf("the service redirected %s to %s; set endpoint to the final URL", e.From, e.To)
+}
+
+// MalformedEventError is a stream event that is not valid for the format.
+type MalformedEventError struct{ Detail string }
+
+func (e *MalformedEventError) Error() string { return "corrupt event stream: " + e.Detail }
+
 // TransportError is a failure to reach the service or read its reply.
 type TransportError struct{ Err error }
 
@@ -498,6 +575,10 @@ func Reason(err error) string {
 		}
 	case errors.As(err, new(*ProviderError)):
 		return "the provider returned an error"
+	case errors.As(err, new(*RedirectError)):
+		return "the service redirected to another origin"
+	case errors.As(err, new(*MalformedEventError)):
+		return "the reply stream is corrupt"
 	case errors.As(err, new(*UnexpectedResponseError)):
 		return "the reply does not match format"
 	case errors.Is(err, ErrEmptyResult):
@@ -521,24 +602,56 @@ func Reason(err error) string {
 
 // Redactor replaces the API key with •••• in anything Cida prints or
 // shows, including a provider's echo of it inside JSON or a URL.
-type Redactor struct{ Secret string }
+type Redactor struct{ Secrets []string }
 
 const mask = "••••"
 
-func (r Redactor) Redact(text string) string {
-	// Anything shorter cannot be a key, and replacing it would garble text.
-	if len([]rune(r.Secret)) < 4 {
-		return text
+// RedactorFor covers the API key and the credentials in cfg.Headers, which
+// can replace the generated authentication headers.
+func RedactorFor(cfg *config.Config) Redactor {
+	secrets := []string{cfg.APIKey}
+	for name, value := range cfg.Headers {
+		if !sensitiveHeader(name) {
+			continue
+		}
+		secrets = append(secrets, value)
+		// "Bearer token": the token alone may be echoed without its scheme.
+		if _, credentials, ok := strings.Cut(value, " "); ok {
+			secrets = append(secrets, credentials)
+		}
 	}
-	quoted, _ := json.Marshal(r.Secret)
-	jsonEscaped := string(quoted[1 : len(quoted)-1])
-	for _, form := range []string{
-		r.Secret,
-		jsonEscaped,
-		strings.ReplaceAll(jsonEscaped, "/", `\/`),
-		url.QueryEscape(r.Secret),
-	} {
-		text = strings.ReplaceAll(text, form, mask)
+	return Redactor{Secrets: secrets}
+}
+
+func sensitiveHeader(name string) bool {
+	name = strings.ToLower(name)
+	for _, part := range []string{"auth", "key", "token", "secret", "cookie"} {
+		if strings.Contains(name, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r Redactor) Redact(text string) string {
+	// Longest first, so a full header value goes before its token.
+	secrets := slices.Clone(r.Secrets)
+	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
+	for _, secret := range secrets {
+		// Anything shorter cannot be a key, and replacing it would garble text.
+		if len([]rune(secret)) < 4 {
+			continue
+		}
+		quoted, _ := json.Marshal(secret)
+		jsonEscaped := string(quoted[1 : len(quoted)-1])
+		for _, form := range []string{
+			secret,
+			jsonEscaped,
+			strings.ReplaceAll(jsonEscaped, "/", `\/`),
+			url.QueryEscape(secret),
+		} {
+			text = strings.ReplaceAll(text, form, mask)
+		}
 	}
 	return text
 }

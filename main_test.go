@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,9 +9,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/erning/cida-cli/internal/config"
 	"github.com/erning/cida-cli/internal/llm"
@@ -245,4 +249,50 @@ func TestCLIPrintPromptErrors(t *testing.T) {
 			t.Fatalf("exit %d, stderr %q", code, diagnostics.String())
 		}
 	})
+}
+
+// TestHelperMain runs the real main function in a child process.
+func TestHelperMain(t *testing.T) {
+	if os.Getenv("CIDA_TEST_HELPER") != "1" {
+		t.Skip("helper process")
+	}
+	os.Args = []string{"cida", "--config", os.Getenv("CIDA_TEST_CONFIG")}
+	os.Stderr.WriteString("ready\n")
+	main()
+}
+
+func TestInterruptWhileReadingInput(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperMain$")
+	cmd.Env = append(os.Environ(), "CIDA_TEST_HELPER=1", "CIDA_TEST_CONFIG="+cliConfig(t, "http://127.0.0.1/v1"))
+	stdin, err := cmd.StdinPipe() // stays open: the child blocks reading it
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer cmd.Process.Kill()
+	if line, _ := bufio.NewReader(stderr).ReadString('\n'); line != "ready\n" {
+		t.Fatalf("child output %q", line)
+	}
+	time.Sleep(200 * time.Millisecond) // let main install its signal handler and block on stdin
+	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 130 {
+			t.Fatalf("wait: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("process still blocked reading input after Ctrl+C")
+	}
 }

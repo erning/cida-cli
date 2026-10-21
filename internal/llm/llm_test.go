@@ -174,11 +174,11 @@ func TestCustomActionFollowsPolicy(t *testing.T) {
 }
 
 func TestRedactor(t *testing.T) {
-	r := Redactor{Secret: "a/b+c"}
+	r := Redactor{Secrets: []string{"a/b+c"}}
 	if got := r.Redact(`k=a/b+c j="a\/b+c" q=a%2Fb%2Bc`); got != `k=•••• j="••••" q=••••` {
 		t.Errorf("redacted %q", got)
 	}
-	if got := (Redactor{Secret: "ab"}).Redact("ab"); got != "ab" {
+	if got := (Redactor{Secrets: []string{"ab"}}).Redact("ab"); got != "ab" {
 		t.Errorf("short secret redacted: %q", got)
 	}
 }

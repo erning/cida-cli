@@ -141,3 +141,107 @@ func TestRequestHeadersAndBodyMerge(t *testing.T) {
 		t.Fatalf("merge = %#v", merged)
 	}
 }
+
+func TestMalformedEventFailsStream(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format config.Format
+		body   string
+	}{
+		{"chat broken JSON", config.ChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {broken\n\ndata: [DONE]\n\n"},
+		{"chat non-object", config.ChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: 42\n\ndata: [DONE]\n\n"},
+		{"chat choices", config.ChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {\"choices\":\"x\"}\n\ndata: [DONE]\n\n"},
+		{"chat content type", config.ChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":5}}]}\n\ndata: [DONE]\n\n"},
+		{"responses delta", config.Responses, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":[1]}\n\ndata: {\"type\":\"response.completed\"}\n\n"},
+		{"anthropic delta", config.AnthropicMessages, "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\ndata: {oops\n\ndata: {\"type\":\"message_stop\"}\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _ := serve(t, 200, "text/event-stream", tc.body)
+			text, err := collect(t, testConfig(srv.URL, tc.format))
+			if text != "partial" || !errors.As(err, new(*MalformedEventError)) {
+				t.Fatalf("text %q, err %v", text, err)
+			}
+			if Reason(err) != "the reply stream is corrupt" {
+				t.Errorf("reason %q", Reason(err))
+			}
+		})
+	}
+}
+
+func TestStreamToleratesEmptyAndDoneEvents(t *testing.T) {
+	body := "data:\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\ndata: {\"type\":\"response.completed\"}\n\n"
+	srv, _, _ := serve(t, 200, "text/event-stream", body)
+	text, err := collect(t, testConfig(srv.URL, config.Responses))
+	if err != nil || text != "ok" {
+		t.Fatalf("text %q, err %v", text, err)
+	}
+}
+
+func redirectClient(t *testing.T, from string, target string, seen *http.Header) *Client {
+	return &Client{HTTP: &http.Client{
+		CheckRedirect: SameOriginRedirects,
+		Transport: testutil.RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.String() == from {
+				return &http.Response{StatusCode: 307, Header: http.Header{"Location": {target}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+			}
+			*seen = r.Header.Clone()
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`)), Request: r}, nil
+		}),
+	}}
+}
+
+func TestRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		name, from, target string
+		refused            bool
+	}{
+		{"other host", "https://provider.example/v1", "https://other.example/collect", true},
+		{"other port", "https://provider.example/v1", "https://provider.example:8443/v1", true},
+		{"downgrade", "https://provider.example/v1", "http://provider.example/v1", true},
+		{"upgrade", "http://provider.example/v1", "https://provider.example/v1", true},
+		{"same origin", "https://provider.example/v1", "https://provider.example:443/v2", false},
+		{"same origin relative", "https://provider.example/v1", "/v2", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen http.Header
+			cfg := testConfig(tc.from, config.AnthropicMessages)
+			err := redirectClient(t, tc.from, tc.target, &seen).Send(context.Background(), Prepare(cfg, BuildPrompt(cfg, translate(cfg), "text")), func(string) {})
+			if tc.refused {
+				var re *RedirectError
+				if !errors.As(err, &re) || seen != nil {
+					t.Fatalf("err %v, forwarded headers %v", err, seen)
+				}
+				if strings.Contains(err.Error(), "collect") || strings.Contains(err.Error(), cfg.APIKey) {
+					t.Errorf("error leaks path or key: %v", err)
+				}
+				return
+			}
+			if err != nil || seen.Get("x-api-key") != cfg.APIKey {
+				t.Fatalf("err %v, headers %v", err, seen)
+			}
+		})
+	}
+}
+
+func TestDefaultClientRefusesCrossOriginRedirect(t *testing.T) {
+	if DefaultClient.HTTP.CheckRedirect == nil {
+		t.Fatal("DefaultClient follows any redirect")
+	}
+}
+
+func TestHeaderCredentialsAreRedacted(t *testing.T) {
+	srv, _, _ := serve(t, 401, "application/json", `{"error":{"message":"bad Bearer sk-header-secret / sk-header-secret"}}`)
+	cfg := testConfig(srv.URL, config.ChatCompletions)
+	cfg.APIKey = ""
+	cfg.Auth = config.AuthNone
+	cfg.Headers = map[string]string{"Authorization": "Bearer sk-header-secret", "X-Project": "visible-project"}
+	_, err := collect(t, cfg)
+	var he *HTTPError
+	if !errors.As(err, &he) || strings.Contains(he.Body, "sk-header-secret") || strings.Contains(he.ProviderMessage, "sk-header-secret") {
+		t.Fatalf("err %v", err)
+	}
+	if got := RedactorFor(cfg).Redact("X-Project visible-project Bearer"); got != "X-Project visible-project Bearer" {
+		t.Errorf("over-redacted: %q", got)
+	}
+}

@@ -47,6 +47,12 @@ Examples:
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// After the first Ctrl+C, restore default handling so a second one always
+	// terminates the process, even if something is still blocked.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	info, err := os.Stdin.Stat()
 	interactive := err == nil && info.Mode()&os.ModeCharDevice != 0
 	code := run(ctx, os.Args[1:], os.Stdin, interactive, os.Stdout, os.Stderr)
@@ -85,7 +91,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, interactive bool, 
 			fmt.Fprintln(stderr, "cida: provide text as arguments or through standard input; see cida --help")
 			return 2
 		}
-		data, err := io.ReadAll(stdin)
+		data, err := readAll(ctx, stdin)
+		if errors.Is(err, context.Canceled) {
+			return 130
+		}
 		if err != nil {
 			fmt.Fprintln(stderr, "cida: read input:", err)
 			return 1
@@ -161,9 +170,29 @@ func run(ctx context.Context, args []string, stdin io.Reader, interactive bool, 
 		return 130
 	}
 	if err != nil {
-		message := (llm.Redactor{Secret: cfg.APIKey}).Redact(fmt.Sprintf("cida: %s: %v\n", llm.Reason(err), err))
+		message := llm.RedactorFor(cfg).Redact(fmt.Sprintf("cida: %s: %v\n", llm.Reason(err), err))
 		fmt.Fprint(stderr, message)
 		return 1
 	}
 	return 0
+}
+
+// readAll reads r to the end, but returns as soon as ctx is cancelled. The
+// read itself cannot be interrupted, so it is abandoned in the background.
+func readAll(ctx context.Context, r io.Reader) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(r)
+		done <- result{data, err}
+	}()
+	select {
+	case res := <-done:
+		return res.data, res.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
